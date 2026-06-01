@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">IPTV Player</string>
+    <string name="search_hint">Search / ძებნა</string>
+    <string name="all_groups">All / ყველა / Все</string>
+    <string name="load_url">Load URL</string>
+    <string name="favorites_only">Favorites</string>
+</resources>

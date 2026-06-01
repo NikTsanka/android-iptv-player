@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <!-- Android TV launcher banner (320x180). Blue field + play glyph. -->
+    <path android:fillColor="#FF173A6E" android:pathData="M0,0 H320 V180 H0 Z" />
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M64,66 L64,114 L106,90 Z" />
+    <path android:fillColor="#FF8FB6F0"
+        android:pathData="M134,80 H262 V92 H134 Z" />
+    <path android:fillColor="#FF5C86C9"
+        android:pathData="M134,100 H226 V110 H134 Z" />
+</vector>

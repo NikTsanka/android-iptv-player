@@ -2,6 +2,8 @@ package com.iptv.player.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
@@ -27,6 +29,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
@@ -36,6 +41,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -61,26 +67,42 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.iptv.player.data.Channel
 import com.iptv.player.player.PlayerSurface
+import kotlinx.coroutines.delay
 
 /**
  * Fullscreen "live TV" layout: the video fills the screen and a channel panel slides in
  * over it. D-pad up/down zaps channels when the panel is closed; center/menu opens it.
  */
 @Composable
-fun MainScreen(vm: MainViewModel) {
+fun MainScreen(vm: MainViewModel, inPipMode: Boolean = false) {
     val state by vm.state.collectAsState()
 
     var panelOpen by remember { mutableStateOf(true) }
+
+    // In Picture-in-Picture the window is tiny — show only the video, no overlays.
+    LaunchedEffect(inPipMode) { if (inPipMode) panelOpen = false }
     var urlDialog by remember { mutableStateOf(false) }
+    var volumeOsd by remember { mutableStateOf(false) }
     val rootFocus = remember { FocusRequester() }
 
     LaunchedEffect(Unit) { rootFocus.requestFocus() }
+
+    // Flash the volume OSD for a moment whenever the volume changes, then auto-hide.
+    LaunchedEffect(state.volumeNonce) {
+        if (state.volumeNonce > 0) {
+            volumeOsd = true
+            delay(1500)
+            volumeOsd = false
+        }
+    }
 
     // Android 13+ routes Back through the predictive-back dispatcher, not as a key event,
     // so close the panel here. When the panel is closed, Back falls through and exits.
@@ -98,6 +120,8 @@ fun MainScreen(vm: MainViewModel) {
                     Key.Menu -> { panelOpen = !panelOpen; true }
                     Key.DirectionUp -> if (!panelOpen) { vm.playPrevious(); true } else false
                     Key.DirectionDown -> if (!panelOpen) { vm.playNext(); true } else false
+                    Key.DirectionLeft -> if (!panelOpen) { vm.adjustVolume(-5); true } else false
+                    Key.DirectionRight -> if (!panelOpen) { vm.adjustVolume(+5); true } else false
                     Key.DirectionCenter, Key.Enter ->
                         if (!panelOpen) { panelOpen = true; true } else false
                     else -> false
@@ -115,7 +139,7 @@ fun MainScreen(vm: MainViewModel) {
             PlayerSurface(vm.player, Modifier.fillMaxSize())
         }
 
-        if (state.isBuffering) {
+        if (state.isBuffering && !inPipMode) {
             CircularProgressIndicator(
                 modifier = Modifier.align(Alignment.Center),
                 color = MaterialTheme.colorScheme.primary
@@ -123,7 +147,7 @@ fun MainScreen(vm: MainViewModel) {
         }
 
         // Status line (bottom) — hidden while the panel is open to keep it clean.
-        if (!panelOpen) {
+        if (!panelOpen && !inPipMode) {
             Text(
                 text = state.status,
                 color = Color.White.copy(alpha = 0.85f),
@@ -137,9 +161,22 @@ fun MainScreen(vm: MainViewModel) {
             )
         }
 
+        // Transient volume OSD (D-pad ←/→).
+        AnimatedVisibility(
+            visible = volumeOsd && !panelOpen && !inPipMode,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .safeDrawingPadding()
+                .padding(bottom = 56.dp)
+        ) {
+            VolumeOsd(volume = state.volume)
+        }
+
         // Sliding channel panel.
         AnimatedVisibility(
-            visible = panelOpen,
+            visible = panelOpen && !inPipMode,
             enter = slideInHorizontally(initialOffsetX = { -it }),
             exit = slideOutHorizontally(targetOffsetX = { -it }),
             modifier = Modifier.align(Alignment.CenterStart)
@@ -226,11 +263,18 @@ private fun ChannelPanel(
                     contentPadding = PaddingValues(vertical = 2.dp)
                 ) {
                     items(state.groups) { g ->
+                        // The "All" group label is long (trilingual); shorten it on the chip.
+                        val name = if (g == MainViewModel.ALL) "All" else g
+                        val count = state.groupCounts[g]
                         FilterChip(
                             selected = g == state.selectedGroup,
                             onClick = { vm.selectGroup(g) },
                             label = {
-                                Text(g, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    if (count != null) "$name  $count" else name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             },
                             colors = FilterChipDefaults.filterChipColors()
                         )
@@ -292,10 +336,21 @@ private fun ChannelRow(
                 modifier = Modifier.width(30.dp)
             )
             // Channel logo (reserve the slot even when absent, so names stay aligned).
+            // A faint TV glyph sits behind as the placeholder/fallback; the logo crossfades
+            // in over it and replaces it on error.
             Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                Icon(
+                    Icons.Filled.LiveTv,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
+                    modifier = Modifier.size(22.dp)
+                )
                 if (!channel.logoUrl.isNullOrBlank()) {
                     AsyncImage(
-                        model = channel.logoUrl,
+                        model = ImageRequest.Builder(LocalContext.current)
+                            .data(channel.logoUrl)
+                            .crossfade(true)
+                            .build(),
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.size(36.dp)
@@ -349,4 +404,33 @@ private fun UrlDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
+}
+
+@Composable
+private fun VolumeOsd(volume: Int) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.65f),
+        contentColor = Color.White,
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+        ) {
+            Icon(
+                if (volume == 0) Icons.AutoMirrored.Filled.VolumeOff
+                else Icons.AutoMirrored.Filled.VolumeUp,
+                contentDescription = null
+            )
+            Spacer(Modifier.width(12.dp))
+            LinearProgressIndicator(
+                progress = { volume / 100f },
+                modifier = Modifier.width(160.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = Color.White.copy(alpha = 0.25f),
+            )
+            Spacer(Modifier.width(12.dp))
+            Text("$volume%", style = MaterialTheme.typography.labelLarge)
+        }
+    }
 }

@@ -10,6 +10,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
@@ -24,6 +25,7 @@ import kotlinx.coroutines.launch
 
 data class UiState(
     val groups: List<String> = emptyList(),
+    val groupCounts: Map<String, Int> = emptyMap(),
     val selectedGroup: String = MainViewModel.ALL,
     val search: String = "",
     val favoritesOnly: Boolean = false,
@@ -33,6 +35,9 @@ data class UiState(
     val status: String = "Ready",
     val playlistUrl: String = "",
     val isBuffering: Boolean = false,
+    val volume: Int = 100,
+    // Bumped on every volume change so the UI can flash a transient volume OSD.
+    val volumeNonce: Int = 0,
 )
 
 @OptIn(UnstableApi::class)
@@ -54,7 +59,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         setEnableDecoderFallback(true)
     }
 
-    val player: ExoPlayer = ExoPlayer.Builder(app, renderersFactory).build().apply {
+    // Small playback buffer so zapping starts fast; keep enough headroom to ride out jitter.
+    private val loadControl = DefaultLoadControl.Builder()
+        .setBufferDurationsMs(
+            /* minBufferMs = */ 5_000,
+            /* maxBufferMs = */ 30_000,
+            /* bufferForPlaybackMs = */ 1_000,
+            /* bufferForPlaybackAfterRebufferMs = */ 2_000,
+        )
+        .build()
+
+    val player: ExoPlayer = ExoPlayer.Builder(app, renderersFactory)
+        .setLoadControl(loadControl)
+        .build().apply {
         playWhenReady = true
         volume = prefs.volume / 100f
         // Route through the media stream and request audio focus so sound actually plays.
@@ -96,7 +113,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private val _state = MutableStateFlow(
-        UiState(playlistUrl = prefs.lastUrl ?: DEFAULT_URL, favorites = favorites.toSet())
+        UiState(
+            playlistUrl = prefs.lastUrl ?: DEFAULT_URL,
+            favorites = favorites.toSet(),
+            volume = prefs.volume,
+        )
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
@@ -114,13 +135,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val channels = repo.loadFromUrl(url.trim())
                 allChannels = channels
                 prefs.lastUrl = url.trim()
+                val byGroup = channels.groupingBy { it.group }.eachCount()
                 val groups = buildList {
                     add(ALL)
-                    addAll(channels.map { it.group }.distinct().sortedBy { it.lowercase() })
+                    addAll(byGroup.keys.sortedBy { it.lowercase() })
                 }
+                val counts = byGroup + (ALL to channels.size)
                 _state.update {
                     it.copy(
                         groups = groups,
+                        groupCounts = counts,
                         selectedGroup = ALL,
                         status = "${channels.size} channels",
                         playlistUrl = url.trim()
@@ -173,7 +197,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val clamped = percent.coerceIn(0, 100)
         prefs.volume = clamped
         player.volume = clamped / 100f
+        _state.update { it.copy(volume = clamped, volumeNonce = it.volumeNonce + 1) }
     }
+
+    /** Nudge the in-app volume by [delta] percent (drives the D-pad ←/→ OSD). */
+    fun adjustVolume(delta: Int) = setVolume(_state.value.volume + delta)
 
     private fun recompute() {
         val s = _state.value

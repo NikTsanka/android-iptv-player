@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -31,8 +32,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.LiveTv
-import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.StarBorder
@@ -40,6 +42,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
@@ -74,6 +77,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.iptv.player.data.Channel
+import com.iptv.player.data.Playlist
 import com.iptv.player.player.PlayerSurface
 import kotlinx.coroutines.delay
 
@@ -89,7 +93,7 @@ fun MainScreen(vm: MainViewModel, inPipMode: Boolean = false) {
 
     // In Picture-in-Picture the window is tiny — show only the video, no overlays.
     LaunchedEffect(inPipMode) { if (inPipMode) panelOpen = false }
-    var urlDialog by remember { mutableStateOf(false) }
+    var playlistDialog by remember { mutableStateOf(false) }
     var volumeOsd by remember { mutableStateOf(false) }
     val rootFocus = remember { FocusRequester() }
 
@@ -183,17 +187,20 @@ fun MainScreen(vm: MainViewModel, inPipMode: Boolean = false) {
         ) {
             ChannelPanel(
                 vm = vm,
-                onOpenUrlDialog = { urlDialog = true },
+                onOpenPlaylists = { playlistDialog = true },
                 onPlay = { vm.play(it) }
             )
         }
     }
 
-    if (urlDialog) {
-        UrlDialog(
-            initial = state.playlistUrl,
-            onDismiss = { urlDialog = false },
-            onLoad = { url -> vm.setPlaylistUrl(url); vm.loadUrl(url); urlDialog = false }
+    if (playlistDialog) {
+        PlaylistDialog(
+            playlists = state.playlists,
+            currentUrl = state.playlistUrl,
+            onSelect = { vm.selectPlaylist(it); playlistDialog = false },
+            onAdd = { name, url -> vm.addPlaylist(name, url); playlistDialog = false },
+            onRemove = { vm.removePlaylist(it) },
+            onDismiss = { playlistDialog = false }
         )
     }
 }
@@ -201,7 +208,7 @@ fun MainScreen(vm: MainViewModel, inPipMode: Boolean = false) {
 @Composable
 private fun ChannelPanel(
     vm: MainViewModel,
-    onOpenUrlDialog: () -> Unit,
+    onOpenPlaylists: () -> Unit,
     onPlay: (Channel) -> Unit,
 ) {
     val state by vm.state.collectAsState()
@@ -241,8 +248,8 @@ private fun ChannelPanel(
                     label = { Text("★ Favorites") }
                 )
                 Spacer(Modifier.width(8.dp))
-                IconButton(onClick = onOpenUrlDialog) {
-                    Icon(Icons.Filled.Link, contentDescription = "Load URL")
+                IconButton(onClick = onOpenPlaylists) {
+                    Icon(Icons.Filled.PlaylistPlay, contentDescription = "Playlists")
                 }
                 Spacer(Modifier.width(4.dp))
                 Text(
@@ -379,30 +386,105 @@ private fun ChannelRow(
 }
 
 @Composable
-private fun UrlDialog(
-    initial: String,
+private fun PlaylistDialog(
+    playlists: List<Playlist>,
+    currentUrl: String,
+    onSelect: (Playlist) -> Unit,
+    onAdd: (name: String, url: String) -> Unit,
+    onRemove: (Playlist) -> Unit,
     onDismiss: () -> Unit,
-    onLoad: (String) -> Unit,
 ) {
-    var text by remember { mutableStateOf(initial) }
+    var name by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Playlist URL") },
+        title = { Text("Playlists") },
         text = {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                singleLine = false,
-                placeholder = { Text("http://…/playlist.m3u") },
-                modifier = Modifier.fillMaxWidth()
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = { if (text.isNotBlank()) onLoad(text.trim()) }) {
-                Text("Load")
+            Column {
+                // Saved playlists: tap to load, trash to remove.
+                if (playlists.isEmpty()) {
+                    Text(
+                        "No playlists yet. Add an M3U/M3U8 URL below.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 240.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        items(playlists, key = { it.id }) { p ->
+                            val selected = p.url == currentUrl
+                            Surface(
+                                onClick = { onSelect(p) },
+                                color = if (selected)
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                                else Color.Transparent,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            p.name,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            p.url,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    IconButton(onClick = { onRemove(p) }) {
+                                        Icon(
+                                            Icons.Filled.Delete,
+                                            contentDescription = "Remove",
+                                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+
+                // Add a new playlist.
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text("Name (optional)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    singleLine = true,
+                    label = { Text("M3U / M3U8 URL") },
+                    placeholder = { Text("http://…/playlist.m3u8") },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+        confirmButton = {
+            TextButton(
+                onClick = { if (url.isNotBlank()) onAdd(name, url.trim()) },
+                enabled = url.isNotBlank()
+            ) { Text("Add & load") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
 }
 

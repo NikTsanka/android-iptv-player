@@ -1,6 +1,8 @@
 package com.iptv.player.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -8,6 +10,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,7 +22,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -28,11 +30,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
@@ -40,12 +45,14 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -80,6 +87,7 @@ import com.iptv.player.data.Channel
 import com.iptv.player.data.Playlist
 import com.iptv.player.player.PlayerSurface
 import kotlinx.coroutines.delay
+import kotlin.math.abs
 
 /**
  * Fullscreen "live TV" layout: the video fills the screen and a channel panel slides in
@@ -139,6 +147,37 @@ fun MainScreen(vm: MainViewModel, inPipMode: Boolean = false) {
                 .pointerInput(Unit) {
                     detectTapGestures { panelOpen = !panelOpen }
                 }
+                // Swipe gestures (only when the panel is closed):
+                //   vertical   → zap channel (up = next, down = previous)
+                //   horizontal → volume (right = louder, left = quieter), continuous
+                .pointerInput(panelOpen) {
+                    if (panelOpen) return@pointerInput
+                    val slop = 28.dp.toPx()
+                    var dx = 0f
+                    var dy = 0f
+                    var axis = 0 // 0 = undecided, 1 = horizontal, 2 = vertical
+                    var startVolume = 0
+                    detectDragGestures(
+                        onDragStart = { dx = 0f; dy = 0f; axis = 0; startVolume = vm.state.value.volume },
+                        onDrag = { change, amount ->
+                            change.consume()
+                            dx += amount.x
+                            dy += amount.y
+                            if (axis == 0 && (abs(dx) > slop || abs(dy) > slop)) {
+                                axis = if (abs(dy) > abs(dx)) 2 else 1
+                            }
+                            if (axis == 1) {
+                                val pct = (dx / size.width * 100f).toInt()
+                                vm.setVolume(startVolume + pct)
+                            }
+                        },
+                        onDragEnd = {
+                            if (axis == 2) {
+                                if (dy < 0) vm.playNext() else vm.playPrevious()
+                            }
+                        }
+                    )
+                }
         ) {
             PlayerSurface(vm.player, Modifier.fillMaxSize())
         }
@@ -194,12 +233,19 @@ fun MainScreen(vm: MainViewModel, inPipMode: Boolean = false) {
     }
 
     if (playlistDialog) {
+        // SAF picker for importing a local .m3u/.m3u8 file (any type — m3u MIME is unreliable).
+        val importLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri != null) { vm.importPlaylistFromUri(uri); playlistDialog = false }
+        }
         PlaylistDialog(
             playlists = state.playlists,
             currentUrl = state.playlistUrl,
             onSelect = { vm.selectPlaylist(it); playlistDialog = false },
             onAdd = { name, url -> vm.addPlaylist(name, url); playlistDialog = false },
             onRemove = { vm.removePlaylist(it) },
+            onImportFile = { importLauncher.launch(arrayOf("*/*")) },
             onDismiss = { playlistDialog = false }
         )
     }
@@ -392,6 +438,7 @@ private fun PlaylistDialog(
     onSelect: (Playlist) -> Unit,
     onAdd: (name: String, url: String) -> Unit,
     onRemove: (Playlist) -> Unit,
+    onImportFile: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var name by remember { mutableStateOf("") }
@@ -401,56 +448,52 @@ private fun PlaylistDialog(
         onDismissRequest = onDismiss,
         title = { Text("Playlists") },
         text = {
-            Column {
-                // Saved playlists: tap to load, trash to remove.
+            // Whole body scrolls so the Add/Import controls stay reachable above the keyboard.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (playlists.isEmpty()) {
                     Text(
-                        "No playlists yet. Add an M3U/M3U8 URL below.",
+                        "No playlists yet. Add a URL or import a file below.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                     )
                 } else {
-                    LazyColumn(
-                        modifier = Modifier.heightIn(max = 240.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        items(playlists, key = { it.id }) { p ->
-                            val selected = p.url == currentUrl
-                            Surface(
-                                onClick = { onSelect(p) },
-                                color = if (selected)
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
-                                else Color.Transparent,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                shape = RoundedCornerShape(6.dp),
-                                modifier = Modifier.fillMaxWidth()
+                    // Saved playlists: tap to load, trash to remove.
+                    playlists.forEach { p ->
+                        val selected = p.url == currentUrl
+                        Surface(
+                            onClick = { onSelect(p) },
+                            color = if (selected)
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                            else Color.Transparent,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
-                                ) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            p.name,
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            p.url,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    IconButton(onClick = { onRemove(p) }) {
-                                        Icon(
-                                            Icons.Filled.Delete,
-                                            contentDescription = "Remove",
-                                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                        )
-                                    }
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        p.name,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        p.url,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(onClick = { onRemove(p) }) {
+                                    Icon(
+                                        Icons.Filled.Delete,
+                                        contentDescription = "Remove",
+                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                    )
                                 }
                             }
                         }
@@ -459,7 +502,7 @@ private fun PlaylistDialog(
 
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
 
-                // Add a new playlist.
+                // Add a new playlist by URL — inline button so it stays visible with the keyboard up.
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -468,23 +511,29 @@ private fun PlaylistDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(6.dp))
-                OutlinedTextField(
-                    value = url,
-                    onValueChange = { url = it },
-                    singleLine = true,
-                    label = { Text("M3U / M3U8 URL") },
-                    placeholder = { Text("http://…/playlist.m3u8") },
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = url,
+                        onValueChange = { url = it },
+                        singleLine = true,
+                        label = { Text("M3U / M3U8 URL") },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    FilledTonalButton(
+                        onClick = { if (url.isNotBlank()) onAdd(name, url.trim()) },
+                        enabled = url.isNotBlank()
+                    ) { Text("Add") }
+                }
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(onClick = onImportFile, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.FolderOpen, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Import .m3u file")
+                }
             }
         },
-        confirmButton = {
-            TextButton(
-                onClick = { if (url.isNotBlank()) onAdd(name, url.trim()) },
-                enabled = url.isNotBlank()
-            ) { Text("Add & load") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
 }
 

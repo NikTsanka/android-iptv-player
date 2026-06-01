@@ -1,6 +1,10 @@
 package com.iptv.player.ui
 
 import android.app.Application
+import android.content.ContentResolver
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.annotation.OptIn
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -48,7 +52,7 @@ data class UiState(
 @OptIn(UnstableApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val repo = PlaylistRepository()
+    private val repo = PlaylistRepository(app)
     private val prefs = AppPrefs(app)
 
     private var allChannels: List<Channel> = emptyList()
@@ -181,6 +185,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         loadUrl(playlist.url)
     }
 
+    /** Import a local .m3u/.m3u8 file picked via SAF; persist read access and add it. */
+    fun importPlaylistFromUri(uri: Uri) {
+        val resolver = getApplication<Application>().contentResolver
+        runCatching {
+            resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val name = queryDisplayName(resolver, uri)
+            ?: uri.lastPathSegment?.substringAfterLast('/')
+            ?: "Local playlist"
+        addPlaylist(name, uri.toString())
+    }
+
+    private fun queryDisplayName(resolver: ContentResolver, uri: Uri): String? =
+        runCatching {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()
+
     fun setPlaylistUrl(url: String) = _state.update { it.copy(playlistUrl = url) }
 
     fun loadUrl(url: String = _state.value.playlistUrl) {
@@ -188,7 +210,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.update { it.copy(status = "Loading…") }
             try {
-                val channels = repo.loadFromUrl(url.trim())
+                val channels = repo.load(url.trim())
                 allChannels = channels
                 prefs.lastUrl = url.trim()
                 val byGroup = channels.groupingBy { it.group }.eachCount()

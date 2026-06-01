@@ -39,6 +39,7 @@ captures/
 # Keystore files (keep signing material out of VCS)
 *.jks
 *.keystore
+keystore.properties
 
 # Kotlin
 .kotlin/
